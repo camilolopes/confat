@@ -386,6 +386,42 @@ def _categorize(desc):
             return v
     return "Outros"
 
+def _extract_holder_candidates_from_pages(file_bytes: bytes):
+    bio = io.BytesIO(file_bytes)
+    cands = []
+    with pdfplumber.open(bio) as pdf:
+        for page in pdf.pages:
+            txt = page.extract_text() or ""
+            lines = [l.strip() for l in txt.splitlines()[:12] if l and l.strip()]
+            for t in lines:
+                s = re.sub(r"[^\w\s\.\-Á-Üá-ü]", " ", t, flags=re.UNICODE).strip()
+                if len(s) < 8:
+                    continue
+                low = s.lower()
+                if any(k in low for k in ["olá","ola","nubank","fatura","cartao","cartão","resumo","vencimento","pagamento","limite","valor"]):
+                    continue
+                letters_total = sum(ch.isalpha() for ch in s)
+                if letters_total == 0:
+                    continue
+                upper_ratio = sum(ch.isupper() for ch in s if ch.isalpha()) / letters_total
+                if upper_ratio < 0.8:
+                    continue
+                if len(s.split()) < 2:
+                    continue
+                words = re.split(r"\s+", s)
+                lowers = {"da","de","do","dos","das","e"}
+                fixed = []
+                for i,w in enumerate(words):
+                    wl = w.lower()
+                    if i>0 and wl in lowers:
+                        fixed.append(wl)
+                    else:
+                        fixed.append(wl.capitalize())
+                name = " ".join(fixed)
+                cands.append(name)
+    return cands
+
+
 def _parse_nubank_pdf(file_bytes: bytes) -> pd.DataFrame:
     bio = io.BytesIO(file_bytes)
     texts = []
@@ -393,7 +429,8 @@ def _parse_nubank_pdf(file_bytes: bytes) -> pd.DataFrame:
         for page in pdf.pages:
             txt = page.extract_text() or ""
             texts.append(txt)
-    full = "\n".join(texts)
+    full = "\\n".join(texts)
+
 
     cands = _extract_holder_candidates_from_pages(file_bytes)
     if cands:
@@ -401,6 +438,13 @@ def _parse_nubank_pdf(file_bytes: bytes) -> pd.DataFrame:
         holder = Counter(cands).most_common(1)[0][0]
     else:
         holder = _guess_holder_from_header(full)
+
+
+
+
+
+
+
     last4 = "0000"
     m_last4 = re.search(r"•{2,}\s*(\d{4})", full)
     if not m_last4:
