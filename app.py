@@ -1,7 +1,7 @@
 
 import io
 import streamlit as st
-from processor import build_processed_workbook_c6, build_processed_workbook_nubank
+from processor import build_processed_workbook_c6, build_processed_workbook_nubank_auto
 
 st.set_page_config(page_title="Faturas Cartão - Processor", page_icon="💳", layout="centered")
 
@@ -33,13 +33,13 @@ if bank.startswith("C6"):
     uploaded = st.file_uploader("Envie o arquivo .xlsx do C6", type=["xlsx"])
 elif bank.startswith("Nubank"):
     uploaded = st.file_uploader("Envie a fatura do Nubank (.pdf ou .csv)", type=["pdf","csv"])
-    uploaded = st.file_uploader("Envie a fatura do Nubank em .pdf", type=["pdf"])
+
 else:
     uploaded = None
 
 if uploaded is not None:
     st.write("Arquivo recebido:", uploaded.name)
-    if st.button("▶️ Processar", type="primary"):
+    if st.button("▶️ Processar", type="primary")"):
         try:
             if bank.startswith("C6"):
                 output_bytes = build_processed_workbook_c6(uploaded.read())
