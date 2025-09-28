@@ -7,7 +7,7 @@ from processor import build_processed_workbook_c6, build_processed_workbook_nuba
 st.set_page_config(page_title="Faturas Cartão - Processor", page_icon="💳", layout="centered")
 
 st.title("💳 Processador de Faturas (C6 & Nubank)")
-st.caption("Escolha o banco e envie a fatura no formato correto para gerar a planilha consolidada.")
+st.caption("Selecione o banco e envie a fatura no formato correto para gerar a planilha consolidada.")
 
 with st.expander("📌 Como funciona", expanded=False):
     st.markdown(
@@ -24,6 +24,7 @@ with st.expander("📌 Como funciona", expanded=False):
 - **Devoluções** (valores negativos) e **Resumo da Fatura**
 - Abas por cartão com **pizza (Top 3 + Outras)** e título com **final do cartão + portador**
 - Aba **Transações Originais** (oculta)
+- **Parcelas Ativas** com compromisso futuro e término estimado
 """
     )
 
