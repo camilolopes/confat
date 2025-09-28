@@ -33,48 +33,73 @@ def _write_df(ws, df, start_row=1, start_col=1):
 def _normalize_header(s):
     if s is None:
         return ""
-    import re, unicodedata
     t = unicodedata.normalize("NFKD", str(s)).encode("ascii","ignore").decode("ascii")
     t = t.lower()
-    t = re.sub(r"r\$|\\(r\\$?\\)|currency|valor\\s*\\(.*\\)", "valor", t)
+    # simplify "valor (em r$)" etc.
+    t = re.sub(r"r\$|\(r\$?\)|currency|valor\s*\(.*?\)", "valor", t)
     t = re.sub(r"[^a-z0-9]+", " ", t)
-    t = re.sub(r"\\s+", " ", t).strip()
+    t = re.sub(r"\s+", " ", t).strip()
     return t
 
-def _best_sheet(excel_io):
-    # Try to pick the sheet with the most overlap with expected columns
-    xl = pd.ExcelFile(excel_io)
-    candidates = []
-    expected_tokens = [
+def _row_looks_like_header(vals):
+    # returns True if the row values resemble our expected headers
+    norm = [_normalize_header(v) for v in vals]
+    needed = [
         ("nome no cartao", {"nome","cartao"}),
         ("final do cartao", {"final","cartao"}),
         ("categoria", {"categoria"}),
-        ("descricao", {"descricao","estabelecimento","loja","merchant"}),
+        ("descricao", {"descricao"}),
         ("valor brl", {"valor"}),
     ]
-    for sheet in xl.sheet_names:
+    score = 0
+    for _, tokens in needed:
+        if any(all(tok in h for tok in tokens) for h in norm):
+            score += 1
+    return score >= 3  # at least 3 expected headers present
+
+def _pick_sheet_and_dataframe(file_bytes):
+    # Load Excel and choose the most promising sheet
+    bio = io.BytesIO(file_bytes)
+    xl = pd.ExcelFile(bio)
+    best_sheet = None
+    best_score = -1
+    for sh in xl.sheet_names:
         try:
-            df_tmp = xl.parse(sheet, nrows=3)
-            norm = [_normalize_header(c) for c in df_tmp.columns]
-            score = 0
-            for label, tokens in expected_tokens:
-                if any(all(tok in h for tok in tokens) for h in norm):
-                    score += 1
-            candidates.append((score, sheet))
+            df = xl.parse(sh, header=0, nrows=5)
         except Exception:
             continue
-    candidates.sort(reverse=True)
-    return candidates[0][1] if candidates else None
+        norm_cols = [_normalize_header(c) for c in df.columns]
+        score = 0
+        for tokens in [{"nome","cartao"},{"final","cartao"},{"categoria"},{"descricao"},{"valor"}]:
+            if any(all(tok in h for tok in tokens) for h in norm_cols):
+                score += 1
+        if score > best_score:
+            best_score = score
+            best_sheet = sh
+
+    # parse best sheet fully (with header=0 first)
+    bio.seek(0)
+    df = pd.read_excel(bio, sheet_name=best_sheet if best_sheet else 0, header=0)
+
+    # if header row is actually on the first data row, re-header using first row values
+    first_rows = min(8, len(df))
+    for r in range(first_rows):
+        row_vals = df.iloc[r].tolist()
+        if _row_looks_like_header(row_vals):
+            # set header from this row and drop all rows up to it
+            new_cols = [str(v) for v in row_vals]
+            df = df.iloc[r+1:].reset_index(drop=True)
+            df.columns = new_cols
+            break
+
+    return df
 
 def _coerce_brl(x):
     if pd.isna(x): return None
     s = str(x)
-    # remove currency and spaces
     s = s.replace("R$", "").replace(" ", "")
-    # keep only digits , . -
-    import re
     s = re.sub(r"[^0-9,.-]", "", s)
-    # if there is comma and dot, assume comma as decimal if comma is last separator
+    # handle thousand/decimal separators
     if s.count(",") == 1 and s.count(".") >= 1:
         s = s.replace(".", "")
         s = s.replace(",", ".")
@@ -88,42 +113,13 @@ def _coerce_brl(x):
         except:
             return None
 
-def _generate_pie_image(series_df, title, img_path, text_fontsize=8, title_fontsize=11):
-    total = series_df["Valor BRL"].sum()
-    labels = [
-        f"{cat}\\n{val/total:.1%} • R$ {val:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
-        for cat, val in zip(series_df["Categoria"], series_df["Valor BRL"])
-    ]
-    plt.figure(figsize=(8, 8))
-    plt.pie(
-        series_df["Valor BRL"],
-        labels=labels,
-        startangle=90,
-        colors=plt.cm.Set2.colors,
-        textprops={"fontsize": 8},
-    )
-    plt.title(title, fontsize=11)
-    plt.tight_layout()
-    plt.savefig(img_path, bbox_inches="tight")
-    plt.close()
-
 def build_processed_workbook(file_bytes: bytes) -> bytes:
-    excel_io = io.BytesIO(file_bytes)
-    # Pick best sheet
-    try:
-        df = pd.read_excel(excel_io, sheet_name="Transações Originais")
-    except Exception:
-        excel_io.seek(0)
-        best = _best_sheet(excel_io)
-        excel_io.seek(0)
-        df = pd.read_excel(excel_io, sheet_name=best if best is not None else 0)
+    # Read dataframe robustly
+    df = _pick_sheet_and_dataframe(file_bytes)
 
-    # Normalize headers
-    original_cols = list(df.columns)
+    # Normalize to canonical column names
     norm_map = {_normalize_header(c): c for c in df.columns}
-
     def find_col(*tokens_sets):
-        # tokens_sets: list of sets of tokens that should all appear
         for norm, orig in norm_map.items():
             for tokens in tokens_sets:
                 if all(tok in norm for tok in tokens):
@@ -135,7 +131,7 @@ def build_processed_workbook(file_bytes: bytes) -> bytes:
     col_categoria = find_col({"categoria"})
     col_descricao = find_col({"descricao"}, {"estabelecimento"}, {"loja"}, {"merchant"})
     col_valor = find_col({"valor"})
-    col_data = find_col({"data"})  # optional
+    col_data = find_col({"data"})
 
     required = {
         "Nome no Cartão": col_nome,
@@ -146,10 +142,9 @@ def build_processed_workbook(file_bytes: bytes) -> bytes:
     }
     missing = [k for k,v in required.items() if v is None]
     if missing:
-        # include debug info to help user
-        raise ValueError(f"Não encontrei colunas: {missing}. Colunas do arquivo: {original_cols}")
+        raise ValueError(f"Não encontrei colunas: {missing}. Títulos encontrados: {list(df.columns)}")
 
-    # Rename to canonical
+    # Rename
     df = df.rename(columns={
         col_nome: "Nome no Cartão",
         col_final: "Final do Cartão",
@@ -159,21 +154,19 @@ def build_processed_workbook(file_bytes: bytes) -> bytes:
         **({col_data: "Data"} if col_data else {})
     })
 
-    # Coerce numeric BRL
+    # Coercions
     df["Valor BRL"] = df["Valor BRL"].apply(_coerce_brl)
-
-    # Dates
     if "Data" in df.columns:
         df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
 
-    # Ensure Final do Cartão is last 4 digits if masked
+    # Extract last 4 digits from card field, even if masked
     def last4(x):
         s = str(x)
-        m = re.findall(r"(\\d{4})", s)
+        m = re.findall(r"(\d{4})", s)
         return m[-1] if m else s[-4:]
     df["Final do Cartão"] = df["Final do Cartão"].apply(last4)
 
-    # Positive/Negative splits
+    # Split positives/negatives
     df_pos = df[df["Valor BRL"] > 0].copy()
     df_neg = df[df["Valor BRL"] < 0].copy()
 
@@ -226,27 +219,22 @@ def build_processed_workbook(file_bytes: bytes) -> bytes:
         return ws
 
     _write_sheet_consol("Consolidado Cartão", consol_cartao)
-    # Estabelecimento com nota simples
     ws_ce = _write_sheet_consol("Consolidado Estabelecimento", consol_estab, header_row=2)
     ws_ce.insert_rows(1)
     ws_ce["A1"] = "NOTA: 'Final do Cartão' = últimos 4 dígitos; 'Nome do Portador' = nome impresso. Somente valores positivos."
     ws_ce.freeze_panes = "A3"
-
     _write_sheet_consol("Consolidado Cat por Cartão", consol_cat_cartao)
 
     # Devoluções
     cols_dev = ["Data","Nome no Cartão","Final do Cartão","Categoria","Descrição","Parcela","Valor BRL"]
     cols_dev_present = [c for c in cols_dev if c in df_neg.columns]
     ws_dev = wb.create_sheet("Devoluções")
-    # write headers
     for j, col in enumerate(cols_dev_present, start=1):
         ws_dev.cell(row=1, column=j, value=str(col if col != "Nome no Cartão" else "Nome do Portador"))
-    # write rows
     for i in range(len(df_neg)):
         for j, col in enumerate(cols_dev_present, start=1):
             val = df_neg.iloc[i][col]
             ws_dev.cell(row=2 + i, column=j, value=None if pd.isna(val) else val)
-    # currency
     if "Valor BRL" in cols_dev_present:
         col_idx = cols_dev_present.index("Valor BRL") + 1
         for r in range(2, ws_dev.max_row + 1):
@@ -287,20 +275,20 @@ def build_processed_workbook(file_bytes: bytes) -> bytes:
     ws_idx.cell(row=row, column=1, value="---"); row += 1
     ws_idx.cell(row=row, column=1, value="Cartões (Mapa de Calor – Top 3 + Outras):"); row += 1
 
-    # Holder map
-    portador_map = (
+    # Holders and pies (Top3 + Outras), hide if <=2 categories total
+    df_pos = df[df["Valor BRL"] > 0].copy()
+    holder_map = (
         df_pos.groupby(["Final do Cartão", "Nome no Cartão"])["Valor BRL"].sum()
         .reset_index()
         .sort_values(["Final do Cartão", "Valor BRL"], ascending=[True, False])
         .drop_duplicates(subset=["Final do Cartão"])
         .set_index("Final do Cartão")["Nome no Cartão"].to_dict()
     )
-
-    # Card tabs with pies (Top3 + Outras), hide if <=2 categories
     cats_por_cartao = df_pos.groupby("Final do Cartão")["Categoria"].nunique().to_dict()
     gastos_por_cartao_cat = (
         df_pos.groupby(["Final do Cartão", "Categoria"], as_index=False)["Valor BRL"].sum()
     )
+
     for final_cartao, grupo in gastos_por_cartao_cat.groupby("Final do Cartão"):
         if grupo.shape[0] == 0:
             continue
@@ -316,13 +304,13 @@ def build_processed_workbook(file_bytes: bytes) -> bytes:
                 top3 = pd.concat([top3, pd.DataFrame([{"Categoria": "Outras", "Valor BRL": outras_val}])], ignore_index=True)
             tabela = top3
 
-        holder = portador_map.get(str(final_cartao), "")
+        holder = holder_map.get(str(final_cartao), "")
         chart_title = f"Distribuição de Gastos – Cartão {final_cartao}"
         if holder:
             chart_title += f" – {holder}"
 
         total = tabela["Valor BRL"].sum()
-        labels = [f"{cat}\\n{val/total:.1%} • R$ {val:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+        labels = [f"{cat}\n{val/total:.1%} • R$ {val:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
                   for cat, val in zip(tabela["Categoria"], tabela["Valor BRL"])]
         plt.figure(figsize=(8, 8))
         plt.pie(tabela["Valor BRL"], labels=labels, startangle=90, colors=plt.cm.Set2.colors, textprops={"fontsize": 8})
