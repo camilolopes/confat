@@ -275,24 +275,58 @@ def _parse_pt_date_token(tok, ref_year=None):
             return None
     return None
 
-def _guess_holder_from_header(full_text):
-    # Try explicit field
-    m = re.search(r"(?:Titular|Nome)\s*[:\-]\s*([A-ZÁ-Ü][A-Za-zÁ-Üá-ü\.\s]+)", full_text)
-    if m:
-        return m.group(1).strip()
-    # Heuristic: first non-"Nubank" uppercase-ish line with spaces
-    for line in full_text.splitlines()[:50]:
-        t = line.strip()
-        if len(t) < 5: 
-            continue
-        if "nubank" in t.lower():
-            continue
-        # name-like: contains spaces and letters, mostly letters
-        letters = re.sub(r"[^A-Za-zÁ-Üá-ü\s\.]", "", t)
-        if len(letters) / max(1,len(t)) > 0.6 and len(letters.split()) >= 2:
-            return letters.strip()
-    return "Nubank"
 
+def _clean_person_name_candidate(s):
+    if not s:
+        return None
+    t = str(s).strip()
+    t = re.sub(r"[^\w\s\.\-Á-Üá-ü]", " ", t, flags=re.UNICODE)
+    t = re.sub(r"\s+", " ", t).strip()
+    low = t.lower()
+    blacklist = [
+        "olá", "ola", "bem vindo", "bem-vindo", "sua fatura", "resumo",
+        "nubank", "cartao", "cartão", "fatura", "limite", "vencimento",
+        "valor", "pagamento", "pdf", "visa", "mastercard", "credito", "crédito",
+        "debito", "débito", "titular:", "nome:", "endereco", "endereço"
+    ]
+    if any(k in low for k in blacklist):
+        return None
+    if any(ch.isdigit() for ch in t):
+        return None
+    words = [w for w in re.split(r"[\s\.]+", t) if w]
+    if not (2 <= len(words) <= 6):
+        return None
+    if any(len(w) < 2 for w in words):
+        return None
+    letters_ratio = sum(c.isalpha() for c in t) / max(1, len(t))
+    if letters_ratio < 0.7:
+        return None
+    lowers = {"da","de","do","dos","das","e"}
+    fixed = []
+    for i,w in enumerate(words):
+        wl = w.lower()
+        if i > 0 and wl in lowers:
+            fixed.append(wl)
+        else:
+            fixed.append(wl.capitalize())
+    name = " ".join(fixed)
+    if " " not in name:
+        return None
+    if any(len(tok) < 2 for tok in name.split()):
+        return None
+    return name
+
+def _guess_holder_from_header(full_text):
+    m = re.search(r"(?:Titular|Nome)\s*[:\-]\s*([A-Za-zÁ-Üá-ü\.\s]+)", full_text)
+    if m:
+        cand = _clean_person_name_candidate(m.group(1))
+        if cand:
+            return cand
+    for line in full_text.splitlines()[:80]:
+        cand = _clean_person_name_candidate(line)
+        if cand:
+            return cand
+    return "Nubank"
 def _extract_parcela(desc):
     # Returns (clean_description, parcela_str or None)
     if desc is None:
@@ -361,7 +395,12 @@ def _parse_nubank_pdf(file_bytes: bytes) -> pd.DataFrame:
             texts.append(txt)
     full = "\n".join(texts)
 
-    holder = _guess_holder_from_header(full)
+    cands = _extract_holder_candidates_from_pages(file_bytes)
+    if cands:
+        from collections import Counter
+        holder = Counter(cands).most_common(1)[0][0]
+    else:
+        holder = _guess_holder_from_header(full)
     last4 = "0000"
     m_last4 = re.search(r"•{2,}\s*(\d{4})", full)
     if not m_last4:
