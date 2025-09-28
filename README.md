@@ -1,6 +1,9 @@
-# C6 Fatura Processor (Streamlit)
+# Processador de Faturas (C6 & Nubank)
 
-App para processar faturas C6 e gerar uma planilha consolidada.
+Nova versão com seleção de banco e suporte a PDF do Nubank.
+- C6 -> .xlsx
+- Nubank -> .pdf
+O app bloqueia extensões incompatíveis por banco.
 
 ## Rodar localmente
 ```
@@ -8,13 +11,8 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Deploy (Streamlit Community Cloud)
-1. Suba estes arquivos para um repositório Git.
-2. No Streamlit Cloud, conecte o repositório e selecione `app.py`.
-3. Deploy.
-
-## Deploy (Railway/Render)
-Use o `Procfile` incluído:
+## Deploy (Streamlit Cloud / Railway / Render)
+Use o Procfile:
 ```
 web: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
 ```
