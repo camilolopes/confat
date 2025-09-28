@@ -8,6 +8,17 @@
 
 ## 📈 Histórico de Versões
 
+### v24 — 28/09/2025
+**Status:** Estável
+
+**Novidades e correções (Nubank):**
+- **Um único uploader** para Nubank aceitando **.pdf** e **.csv** (evita confusão).
+- Processamento com **builder automático** (`build_processed_workbook_nubank_auto`).
+- **Correção de sintaxe** no botão “▶️ Processar” (erro `unterminated string` e `invalid syntax`).
+- **Compatibilidade**: C6 (.xlsx) mantido **sem alterações**.
+
+---
+
 ### v19 — 28/09/2025
 **Status:** Estável
 
