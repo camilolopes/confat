@@ -158,6 +158,30 @@ def build_processed_workbook_c6(file_bytes: bytes) -> bytes:
                 parc.append(None); clean_desc.append(desc)
         df["Parcela"] = parc; df["Descrição"] = clean_desc
     df = _enrich_parcelamento_columns(df)
+
+    # --- C6: Normalização de coluna 'Parcela' se já existir (sem afetar Nubank) ---
+    if "Parcela" in df.columns:
+        def _norm_parcela_c6(val):
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                return None
+            s = str(val).strip().lower()
+            # remover acentos básicos para comparar 'única'
+            import unicodedata
+            s_ascii = unicodedata.normalize("NFKD", s).encode("ascii","ignore").decode("ascii")
+            # caso 'unica' => 1/1
+            if s_ascii == "unica" or s_ascii == "única":
+                return "1/1"
+            # padronizar 'x de y' -> 'x/y'
+            s = s.replace(" de ", "/")
+            # remover espaços
+            s = re.sub(r"\s+", "", s)
+            # manter apenas padrão d+/d+ se existir
+            m = re.search(r"^(\d{1,2})/(\d{1,2})$", s)
+            if m:
+                return f"{int(m.group(1))}/{int(m.group(2))}"
+            return None
+        df["Parcela"] = df["Parcela"].apply(_norm_parcela_c6)
+    # --- fim normalização C6 ---
     return _build_excel_from_transactions(df)
 
 # --------- Nubank (PDF) ---------
