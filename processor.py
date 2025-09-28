@@ -346,6 +346,10 @@ def _parse_nubank_pdf(file_bytes: bytes) -> pd.DataFrame:
     if "Valor BRL" in df.columns: df["Valor BRL"] = pd.to_numeric(df["Valor BRL"], errors="coerce")
     df = _enrich_parcelamento_columns(df); return df
 
+def build_processed_workbook_nubank(file_bytes: bytes) -> bytes:
+    df = _parse_nubank_pdf(file_bytes)
+    return _build_excel_from_transactions(df)
+
 # --------- Workbook builder ---------
 def _build_excel_from_transactions(df: pd.DataFrame) -> bytes:
     df_pos = df[df["Valor BRL"] > 0].copy(); df_neg = df[df["Valor BRL"] < 0].copy()

@@ -1,6 +1,5 @@
 
 import io
-import pandas as pd
 import streamlit as st
 from processor import build_processed_workbook_c6, build_processed_workbook_nubank
 
