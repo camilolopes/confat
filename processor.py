@@ -131,6 +131,54 @@ def _build_pie_image_xl(series_df, title, text_fontsize=8, title_fontsize=11):
     pil_img = PILImage.open(buf)
     return XLImage(pil_img)
 
+
+def _validate_index_links(wb):
+    """
+    Scan the 'Índice' sheet for hyperlinks and verify that each target sheet exists.
+    Writes a small summary block at the end of the Índice sheet.
+    """
+    if "Índice" not in wb.sheetnames:
+        return
+    ws = wb["Índice"]
+    invalid = []
+    checked = 0
+    # Find last row with content in col A
+    last_row = ws.max_row
+    for r in range(1, last_row + 1):
+        cell = ws.cell(row=r, column=1)
+        # skip headings / separators
+        if not cell.value or str(cell.value).strip() in ("---",):
+            continue
+        if str(cell.value).startswith("Cartões ("):
+            continue
+        hl = cell.hyperlink.target if cell.hyperlink else None
+        if not hl or not hl.startswith("#"):
+            continue
+        # parse target like #'<SHEET>'!A1
+        m = re.match(r"#'(.+?)'!A1", hl)
+        if not m:
+            invalid.append((cell.value, hl or ""))
+            checked += 1
+            continue
+        sheet_name = m.group(1)
+        exists = sheet_name in wb.sheetnames
+        if not exists:
+            invalid.append((cell.value, hl))
+        checked += 1
+
+    # Write summary
+    ws.cell(row=last_row + 2, column=1, value="Validação de Links do Índice")
+    ok_count = checked - len(invalid)
+    ws.cell(row=last_row + 3, column=1, value=f"Links verificados: {checked}")
+    ws.cell(row=last_row + 4, column=1, value=f"OK: {ok_count}")
+    ws.cell(row=last_row + 5, column=1, value=f"Inválidos: {len(invalid)}")
+    if invalid:
+        ws.cell(row=last_row + 7, column=1, value="Lista de links inválidos (texto mostrado → alvo):")
+        row = last_row + 8
+        for txt, tgt in invalid:
+            ws.cell(row=row, column=1, value=f"{txt} → {tgt}")
+            row += 1
+
 def build_processed_workbook(file_bytes: bytes) -> bytes:
     df = _pick_sheet_and_dataframe(file_bytes)
 
