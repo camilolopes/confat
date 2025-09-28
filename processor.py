@@ -8,6 +8,37 @@ from openpyxl.drawing.image import Image as XLImage
 from PIL import Image as PILImage
 import pdfplumber
 
+def _sanitize_parcela_c6(val):
+    """
+    Sanitize 'Parcela' for C6:
+    - Excel may auto-convert '2/4' to a date like 2025-04-02; convert back to '2/4' (day/month).
+    - Map 'Única' (any case/accents) to '1/1'.
+    - Normalize variants like '2 de 4', '2 / 4', '02/04' to '2/4'.
+    """
+    import unicodedata
+    import pandas as _pd
+    import re as _re
+    if val is None:
+        return None
+    try:
+        ts = _pd.to_datetime(val, errors='raise', dayfirst=False)
+        d, m = ts.day, ts.month
+        if 1 <= d <= 31 and 1 <= m <= 12:
+            return f"{d}/{m}"
+    except Exception:
+        pass
+    s = str(val).strip()
+    s_ascii = unicodedata.normalize("NFKD", s).encode("ascii","ignore").decode("ascii").lower()
+    if s_ascii == "unica":
+        return "1/1"
+    s_norm = s.lower().replace(" de ", "/")
+    s_norm = _re.sub(r"\s+", "", s_norm)
+    m = _re.search(r"^(\d{1,2})/(\d{1,2})$", s_norm)
+    if m:
+        return f"{int(m.group(1))}/{int(m.group(2))}"
+    return None
+
+
 def _autosize(ws):
     for c in range(1, ws.max_column + 1):
         max_len = 0
@@ -145,7 +176,7 @@ def build_processed_workbook_c6(file_bytes: bytes) -> bytes:
         return m[-1] if m else s[-4:]
     df["Final do Cartão"] = df["Final do Cartão"].apply(last4)
     # Extract parcela from descrição and enrich
-    if "Descrição" in df.columns:
+    if "Descrição" in df.columns and 'Parcela' not in df.columns:
         parc, clean_desc = [], []
         for d in df["Descrição"]:
             desc = None if pd.isna(d) else str(d)
@@ -157,6 +188,8 @@ def build_processed_workbook_c6(file_bytes: bytes) -> bytes:
             else:
                 parc.append(None); clean_desc.append(desc)
         df["Parcela"] = parc; df["Descrição"] = clean_desc
+    if 'Parcela' in df.columns:
+        df['Parcela'] = df['Parcela'].apply(_sanitize_parcela_c6)
     df = _enrich_parcelamento_columns(df)
 
     # --- C6: Normalização de coluna 'Parcela' se já existir (sem afetar Nubank) ---
