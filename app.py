@@ -39,7 +39,7 @@ else:
 
 if uploaded is not None:
     st.write("Arquivo recebido:", uploaded.name)
-    if st.button("▶️ Processar", type="primary")::
+    if st.button("▶️ Processar", type="primary"):
         try:
             if bank.startswith("C6"):
                 output_bytes = build_processed_workbook_c6(uploaded.read())
