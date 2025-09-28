@@ -1,39 +1,54 @@
+
 import io
 import pandas as pd
 import streamlit as st
-from processor import build_processed_workbook
+from processor import build_processed_workbook_c6, build_processed_workbook_nubank
 
-st.set_page_config(page_title="C6 Fatura Processor", page_icon="📊", layout="centered")
-st.title("📊 Processador de Fatura C6")
-st.caption("Envie o arquivo Excel (.xlsx) e receba a planilha consolidada pronta para análise.")
+st.set_page_config(page_title="Faturas Cartão - Processor", page_icon="💳", layout="centered")
 
-with st.expander("📌 Instruções rápidas", expanded=False):
+st.title("💳 Processador de Faturas (C6 & Nubank)")
+st.caption("Escolha o banco e envie a fatura no formato correto para gerar a planilha consolidada.")
+
+with st.expander("📌 Como funciona", expanded=False):
     st.markdown(
-        """**Como usar**
-1. Clique em **Selecionar arquivo** e faça **upload do .xlsx** da fatura.
-2. Clique em **Processar**.
-3. Baixe o arquivo final gerado pelo app.
+        """**Fluxo**
+1. Selecione o **Banco**.
+2. Envie o arquivo no **formato exigido**:
+   - **C6** -> .xlsx
+   - **Nubank** -> .pdf
+3. Clique em **Processar** e baixe o resultado em Excel.
 
-**O que o app faz**
-- Consolida gastos por **cartão**, **estabelecimento** e **categoria por cartão** (apenas valores positivos).
-- Gera **abas por cartão** com gráficos **pizza (Top 3 + Outras)** e título com **final do cartão + nome do portador**.
-- Cria **Índice** com links para navegação e **oculta** a aba **Transações Originais**.
-- Inclui **Devoluções** com valores negativos e **Resumo da Fatura**.
+**O que o app gera**
+- Índice navegável
+- Consolidados: **Cartão**, **Estabelecimento**, **Categoria por Cartão**
+- **Devoluções** (valores negativos) e **Resumo da Fatura**
+- Abas por cartão com **pizza (Top 3 + Outras)** e título com **final do cartão + portador**
+- Aba **Transações Originais** (oculta)
 """
     )
 
-uploaded = st.file_uploader("Selecione o arquivo .xlsx", type=["xlsx"])
+bank = st.selectbox("Banco", ["C6 (Excel .xlsx)", "Nubank (PDF .pdf)"])
+
+if bank.startswith("C6"):
+    uploaded = st.file_uploader("Envie o arquivo .xlsx do C6", type=["xlsx"])
+elif bank.startswith("Nubank"):
+    uploaded = st.file_uploader("Envie a fatura do Nubank em .pdf", type=["pdf"])
+else:
+    uploaded = None
 
 if uploaded is not None:
     st.write("Arquivo recebido:", uploaded.name)
     if st.button("▶️ Processar", type="primary"):
         try:
-            output_bytes = build_processed_workbook(uploaded.read())
+            if bank.startswith("C6"):
+                output_bytes = build_processed_workbook_c6(uploaded.read())
+            else:
+                output_bytes = build_processed_workbook_nubank(uploaded.read())
             st.success("Processamento concluído!")
             st.download_button(
                 label="⬇️ Baixar planilha processada",
                 data=output_bytes,
-                file_name="fatura_c6_processada.xlsx",
+                file_name="fatura_processada.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         except Exception as e:

@@ -5,7 +5,8 @@ import matplotlib.pyplot as plt
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.drawing.image import Image as XLImage
-from PIL import Image as PILImage  # new: to build images from bytes
+from PIL import Image as PILImage
+import pdfplumber
 
 def _autosize(ws):
     for c in range(1, ws.max_column + 1):
@@ -41,54 +42,6 @@ def _normalize_header(s):
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
-def _row_looks_like_header(vals):
-    norm = [_normalize_header(v) for v in vals]
-    needed = [
-        ("nome no cartao", {"nome","cartao"}),
-        ("final do cartao", {"final","cartao"}),
-        ("categoria", {"categoria"}),
-        ("descricao", {"descricao"}),
-        ("valor brl", {"valor"}),
-    ]
-    score = 0
-    for _, tokens in needed:
-        if any(all(tok in h for tok in tokens) for h in norm):
-            score += 1
-    return score >= 3
-
-def _pick_sheet_and_dataframe(file_bytes):
-    bio = io.BytesIO(file_bytes)
-    xl = pd.ExcelFile(bio)
-    best_sheet = None
-    best_score = -1
-    for sh in xl.sheet_names:
-        try:
-            df = xl.parse(sh, header=0, nrows=5)
-        except Exception:
-            continue
-        norm_cols = [_normalize_header(c) for c in df.columns]
-        score = 0
-        for tokens in [{"nome","cartao"},{"final","cartao"},{"categoria"},{"descricao"},{"valor"}]:
-            if any(all(tok in h for tok in tokens) for h in norm_cols):
-                score += 1
-        if score > best_score:
-            best_score = score
-            best_sheet = sh
-
-    bio.seek(0)
-    df = pd.read_excel(bio, sheet_name=best_sheet if best_sheet else 0, header=0)
-
-    first_rows = min(8, len(df))
-    for r in range(first_rows):
-        row_vals = df.iloc[r].tolist()
-        if _row_looks_like_header(row_vals):
-            new_cols = [str(v) for v in row_vals]
-            df = df.iloc[r+1:].reset_index(drop=True)
-            df.columns = new_cols
-            break
-
-    return df
-
 def _coerce_brl(x):
     if pd.isna(x): return None
     s = str(x)
@@ -108,7 +61,6 @@ def _coerce_brl(x):
             return None
 
 def _build_pie_image_xl(series_df, title, text_fontsize=8, title_fontsize=11):
-    # Returns an openpyxl Image object built from an in-memory PNG (no filesystem use)
     total = series_df["Valor BRL"].sum()
     labels = [
         f"{cat}\n{val/total:.1%} • R$ {val:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
@@ -131,56 +83,100 @@ def _build_pie_image_xl(series_df, title, text_fontsize=8, title_fontsize=11):
     pil_img = PILImage.open(buf)
     return XLImage(pil_img)
 
+def _write_sheet_consol(wb, name, data, header_row=1):
+    ws = wb.create_sheet(name)
+    for j, col in enumerate(data.columns, start=1):
+        ws.cell(row=header_row, column=j, value=str(col))
+    for i in range(len(data)):
+        for j, col in enumerate(data.columns, start=1):
+            ws.cell(row=header_row + 1 + i, column=j, value=None if pd.isna(data.iloc[i][col]) else data.iloc[i][col])
+    headers_idx = {ws.cell(row=header_row, column=i).value: i for i in range(1, data.shape[1] + 1)}
+    if "Valor BRL" in headers_idx:
+        c = headers_idx["Valor BRL"]
+        for r in range(header_row + 1, header_row + 1 + len(data)):
+            ws.cell(row=r, column=c).number_format = u'R$ #,##0.00'
+    ws.auto_filter.ref = f"A{header_row}:{get_column_letter(ws.max_column)}{ws.max_row}"
+    _autosize(ws)
+    return ws
 
-def _validate_index_links(wb):
-    """
-    Scan the 'Índice' sheet for hyperlinks and verify that each target sheet exists.
-    Writes a small summary block at the end of the Índice sheet.
-    """
-    if "Índice" not in wb.sheetnames:
-        return
-    ws = wb["Índice"]
-    invalid = []
-    checked = 0
-    # Find last row with content in col A
-    last_row = ws.max_row
-    for r in range(1, last_row + 1):
-        cell = ws.cell(row=r, column=1)
-        # skip headings / separators
-        if not cell.value or str(cell.value).strip() in ("---",):
-            continue
-        if str(cell.value).startswith("Cartões ("):
-            continue
-        hl = cell.hyperlink.target if cell.hyperlink else None
-        if not hl or not hl.startswith("#"):
-            continue
-        # parse target like #'<SHEET>'!A1
-        m = re.match(r"#'(.+?)'!A1", hl)
-        if not m:
-            invalid.append((cell.value, hl or ""))
-            checked += 1
-            continue
-        sheet_name = m.group(1)
-        exists = sheet_name in wb.sheetnames
-        if not exists:
-            invalid.append((cell.value, hl))
-        checked += 1
-
-    # Write summary
-    ws.cell(row=last_row + 2, column=1, value="Validação de Links do Índice")
-    ok_count = checked - len(invalid)
-    ws.cell(row=last_row + 3, column=1, value=f"Links verificados: {checked}")
-    ws.cell(row=last_row + 4, column=1, value=f"OK: {ok_count}")
-    ws.cell(row=last_row + 5, column=1, value=f"Inválidos: {len(invalid)}")
-    if invalid:
-        ws.cell(row=last_row + 7, column=1, value="Lista de links inválidos (texto mostrado → alvo):")
-        row = last_row + 8
-        for txt, tgt in invalid:
-            ws.cell(row=row, column=1, value=f"{txt} → {tgt}")
+def _add_index_and_order(wb, cards_display):
+    if "Índice" in wb.sheetnames:
+        del wb["Índice"]
+    ws_idx = wb.create_sheet("Índice", 0)
+    ws_idx["A1"] = "📑 Índice de Navegação"
+    row = 3
+    for name in ["Consolidado Cartão","Consolidado Estabelecimento","Consolidado Cat por Cartão","Resumo Fatura","Devoluções"]:
+        if name in wb.sheetnames:
+            ws_idx.cell(row=row, column=1, value=name)
+            ws_idx.cell(row=row, column=1).hyperlink = f"#'{name}'!A1"
+            ws_idx.cell(row=row, column=1).style = "Hyperlink"
             row += 1
+    ws_idx.cell(row=row, column=1, value="---"); row += 1
+    ws_idx.cell(row=row, column=1, value="Cartões (Mapa de Calor – Top 3 + Outras):"); row += 1
+    for display, sheet_name in cards_display:
+        ws_idx.cell(row=row, column=1, value=display)
+        ws_idx.cell(row=row, column=1).hyperlink = f"#'{sheet_name}'!A1"
+        ws_idx.cell(row=row, column=1).style = "Hyperlink"
+        row += 1
+    ws_idx.column_dimensions["A"].width = 65
 
-def build_processed_workbook(file_bytes: bytes) -> bytes:
-    df = _pick_sheet_and_dataframe(file_bytes)
+    desired_after_index = ["Consolidado Cartão", "Consolidado Estabelecimento", "Consolidado Cat por Cartão"]
+    current = wb.sheetnames
+    ordered = ["Índice"] + [s for s in desired_after_index if s in current]
+    for s in current:
+        if s not in ordered:
+            ordered.append(s)
+    wb._sheets = [wb[s] for s in ordered]
+
+# -------------- C6 --------------
+def _pick_sheet_and_dataframe_c6(file_bytes):
+    bio = io.BytesIO(file_bytes)
+    try:
+        df = pd.read_excel(bio, sheet_name="Transações Originais", header=0)
+        if df is not None and not df.empty:
+            return df
+    except Exception:
+        pass
+    bio.seek(0)
+    xl = pd.ExcelFile(bio)
+    best_sheet = xl.sheet_names[0]
+    best_score = -1
+    for sh in xl.sheet_names:
+        try:
+            df = xl.parse(sh, header=0, nrows=5)
+        except Exception:
+            continue
+        norm_cols = [_normalize_header(c) for c in df.columns]
+        score = 0
+        for tokens in [{"nome","cartao"},{"final","cartao"},{"categoria"},{"descricao"},{"valor"}]:
+            if any(all(tok in h for tok in tokens) for h in norm_cols):
+                score += 1
+        if score > best_score:
+            best_score = score
+            best_sheet = sh
+    bio.seek(0)
+    df = pd.read_excel(bio, sheet_name=best_sheet, header=0)
+
+    first_rows = min(8, len(df))
+    for r in range(first_rows):
+        row_vals = df.iloc[r].tolist()
+        norm = [_normalize_header(v) for v in row_vals]
+        conds = [
+            any("nome" in h and "cartao" in h for h in norm),
+            any("final" in h and "cartao" in h for h in norm),
+            any("categoria" in h for h in norm),
+            any("descricao" in h or "estabelecimento" in h for h in norm),
+            any("valor" in h for h in norm),
+        ]
+        if sum(conds) >= 3:
+            new_cols = [str(v) for v in row_vals]
+            df = df.iloc[r+1:].reset_index(drop=True)
+            df.columns = new_cols
+            break
+    return df
+
+def build_processed_workbook_c6(file_bytes: bytes) -> bytes:
+    df = _pick_sheet_and_dataframe_c6(file_bytes)
 
     norm_map = {_normalize_header(c): c for c in df.columns}
     def find_col(*tokens_sets):
@@ -216,7 +212,6 @@ def build_processed_workbook(file_bytes: bytes) -> bytes:
         col_valor: "Valor BRL",
         **({col_data: "Data"} if col_data else {})
     })
-
     df["Valor BRL"] = df["Valor BRL"].apply(_coerce_brl)
     if "Data" in df.columns:
         df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
@@ -227,6 +222,243 @@ def build_processed_workbook(file_bytes: bytes) -> bytes:
         return m[-1] if m else s[-4:]
     df["Final do Cartão"] = df["Final do Cartão"].apply(last4)
 
+    return _build_excel_from_transactions(df)
+
+# -------------- Nubank (PDF) --------------
+
+def _pt_month_to_num(m):
+    m = (m or "").strip().lower()
+    mapa = {
+        "jan":1,"janeiro":1,
+        "fev":2,"fevereiro":2,
+        "mar":3,"marco":3,"março":3,
+        "abr":4,"abril":4,
+        "mai":5,"maio":5,
+        "jun":6,"junho":6,
+        "jul":7,"julho":7,
+        "ago":8,"agosto":8,
+        "set":9,"setembro":9,"sep":9,
+        "out":10,"outubro":10,
+        "nov":11,"novembro":11,
+        "dez":12,"dezembro":12
+    }
+    return mapa.get(m)
+
+def _parse_pt_date_token(tok, ref_year=None):
+    # tok examples: "29 AGO", "03/09", "9 set", "12 OUT 2025"
+    tok = str(tok).strip()
+    if not tok: 
+        return None
+    # 1) dd MMM [YYYY]
+    m = re.match(r"^(\d{1,2})\s+([A-Za-zÀ-Üà-ü]{3,})(?:\s+(\d{4}))?$", tok, flags=re.IGNORECASE)
+    if m:
+        d = int(m.group(1))
+        mon = _pt_month_to_num(m.group(2))
+        y = int(m.group(3)) if m.group(3) else (ref_year or pd.Timestamp.today().year)
+        if mon:
+            try:
+                return pd.Timestamp(year=y, month=mon, day=d)
+            except Exception:
+                return None
+    # 2) dd/mm[/yyyy]
+    m = re.match(r"^(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?$", tok)
+    if m:
+        d = int(m.group(1)); mon = int(m.group(2)); y = m.group(3)
+        if y is None:
+            y = ref_year or pd.Timestamp.today().year
+        else:
+            y = int(y); 
+            if y < 100: y += 2000
+        try:
+            return pd.Timestamp(year=y, month=mon, day=d)
+        except Exception:
+            return None
+    return None
+
+def _guess_holder_from_header(full_text):
+    # Try explicit field
+    m = re.search(r"(?:Titular|Nome)\s*[:\-]\s*([A-ZÁ-Ü][A-Za-zÁ-Üá-ü\.\s]+)", full_text)
+    if m:
+        return m.group(1).strip()
+    # Heuristic: first non-"Nubank" uppercase-ish line with spaces
+    for line in full_text.splitlines()[:50]:
+        t = line.strip()
+        if len(t) < 5: 
+            continue
+        if "nubank" in t.lower():
+            continue
+        # name-like: contains spaces and letters, mostly letters
+        letters = re.sub(r"[^A-Za-zÁ-Üá-ü\s\.]", "", t)
+        if len(letters) / max(1,len(t)) > 0.6 and len(letters.split()) >= 2:
+            return letters.strip()
+    return "Nubank"
+
+def _extract_parcela(desc):
+    # Returns (clean_description, parcela_str or None)
+    if desc is None:
+        return None, None
+    s = str(desc)
+    # look for "Parcela X/Y" or "x/y" near end
+    m = re.search(r"(?:Parcela\s*)?(\d{1,2}/\d{1,2})\s*$", s, flags=re.IGNORECASE)
+    if m:
+        parcela = m.group(1)
+        s = s[:m.start()].rstrip(" -–,")
+        return s, parcela
+    return s, None
+
+def _categorize(desc):
+    if not desc:
+        return "Outros"
+    s = desc.lower()
+    rules = [
+        ("seguro", "Seguro"),
+        ("porto seguro", "Seguro"),
+        ("ifood", "Alimentação"),
+        ("uber", "Transporte"),
+        ("99 ", "Transporte"),
+        ("cabify", "Transporte"),
+        ("posto", "Combustível"),
+        ("ipiranga", "Combustível"),
+        ("br mania", "Combustível"),
+        ("shell", "Combustível"),
+        ("mercadolivre", "Marketplace"),
+        ("amazon", "Marketplace"),
+        ("magalu", "Marketplace"),
+        ("submarino", "Marketplace"),
+        ("americanas", "Marketplace"),
+        ("netflix", "Assinaturas"),
+        ("spotify", "Assinaturas"),
+        ("youtube", "Assinaturas"),
+        ("tim", "Telefonia"),
+        ("vivo", "Telefonia"),
+        ("claro", "Telefonia"),
+        ("oi ", "Telefonia"),
+        ("drog", "Saúde"),
+        ("farm", "Saúde"),
+        ("laborat", "Saúde"),
+        ("enel", "Utilities"),
+        ("cpfl", "Utilities"),
+        ("sabesp", "Utilities"),
+        ("energia", "Utilities"),
+        ("light", "Utilities"),
+        ("academ", "Fitness"),
+        ("academia", "Fitness"),
+        ("rest", "Alimentação"),
+        ("pizza", "Alimentação"),
+        ("padaria", "Alimentação"),
+    ]
+    for k, v in rules:
+        if k in s:
+            return v
+    return "Outros"
+
+def _parse_nubank_pdf(file_bytes: bytes) -> pd.DataFrame:
+    bio = io.BytesIO(file_bytes)
+    texts = []
+    with pdfplumber.open(bio) as pdf:
+        for page in pdf.pages:
+            txt = page.extract_text() or ""
+            texts.append(txt)
+    full = "\n".join(texts)
+
+    holder = _guess_holder_from_header(full)
+    last4 = "0000"
+    m_last4 = re.search(r"•{2,}\s*(\d{4})", full)
+    if not m_last4:
+        m_last4 = re.search(r"(\d{4})\s*(?:•|\*{2,}|x{2,})?\s*$", full, flags=re.MULTILINE)
+    if m_last4:
+        last4 = m_last4.group(1)
+
+    current_year = pd.Timestamp.today().year
+    rows = []
+    for line in full.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # date token candidates at line start
+        m = re.match(r"^(\d{1,2}\s+[A-Za-zÀ-Üà-ü]{3,}|\d{1,2}/\d{1,2}(?:/\d{2,4})?)\s+(.*)$", line)
+        if not m:
+            continue
+        date_tok = m.group(1)
+        rest = m.group(2)
+        # value at end
+        m_val = re.search(r"([\-–]?\s*R?\$?\s*[\d\.\,]+)\s*$", rest)
+        if not m_val:
+            continue
+        val_str = m_val.group(1)
+        left = rest[: m_val.start()].strip()
+
+        # split description and clean parcela
+        desc_clean, parcela = _extract_parcela(left)
+
+        # sign classification
+        neg_kw = r"(pagamento|estorno|ajuste|cr[eé]dito)"
+        sign = -1 if (val_str.strip().startswith("-") or re.search(neg_kw, desc_clean or "", re.I)) else 1
+        try:
+            valor = sign * float(val_str.replace("R$", "").replace("–", "-").replace(".", "").replace(",", ".").strip())
+        except:
+            continue
+
+        # parse date
+        dt = _parse_pt_date_token(date_tok, ref_year=current_year)
+
+        rows.append({
+            "Data": dt,
+            "Nome no Cartão": holder,
+            "Final do Cartão": last4,
+            "Categoria": _categorize(desc_clean),
+            "Descrição": desc_clean,
+            "Parcela": parcela,
+            "Valor BRL": valor,
+        })
+
+    df = pd.DataFrame(rows)
+
+    # Fallback: try tables if empty
+    if df.empty:
+        bio.seek(0)
+        with pdfplumber.open(bio) as pdf:
+            for page in pdf.pages:
+                tbl = page.extract_table()
+                if not tbl:
+                    continue
+                header = [str(x) for x in tbl[0]]
+                for row in tbl[1:]:
+                    row = [None if x is None else str(x) for x in row]
+                    data = row[0] if len(row)>0 else None
+                    descricao = row[1] if len(row)>1 else None
+                    valor = row[-1] if len(row)>0 else None
+                    if not (data and descricao and valor):
+                        continue
+                    try:
+                        v = float(valor.replace("R$", "").replace(".", "").replace(",", "."))
+                    except:
+                        continue
+                    desc_clean, parcela = _extract_parcela(descricao)
+                    df = pd.concat([df, pd.DataFrame([{
+                        "Data": _parse_pt_date_token(data, ref_year=current_year),
+                        "Nome no Cartão": holder, "Final do Cartão": last4,
+                        "Categoria": _categorize(desc_clean),
+                        "Descrição": desc_clean, "Parcela": parcela, "Valor BRL": v
+                    }])], ignore_index=True)
+
+    # Final coercions
+    if "Valor BRL" in df.columns:
+        df["Valor BRL"] = pd.to_numeric(df["Valor BRL"], errors="coerce")
+    return df
+
+def build_processed_workbook_nubank(file_bytes: bytes) -> bytes:
+    df = _parse_nubank_pdf(file_bytes)
+    if df is None or df.empty:
+        raise ValueError("Não foi possível extrair transações do PDF do Nubank. Verifique se o arquivo é uma fatura detalhada.")
+    needed = ["Nome no Cartão","Final do Cartão","Categoria","Descrição","Valor BRL"]
+    for c in needed:
+        if c not in df.columns:
+            df[c] = "" if c != "Valor BRL" else 0.0
+    return _build_excel_from_transactions(df)
+
+# -------------- Common workbook builder --------------
+def _build_excel_from_transactions(df: pd.DataFrame) -> bytes:
     df_pos = df[df["Valor BRL"] > 0].copy()
     df_neg = df[df["Valor BRL"] < 0].copy()
 
@@ -258,40 +490,24 @@ def build_processed_workbook(file_bytes: bytes) -> bytes:
     default = wb.active
     wb.remove(default)
 
-    def _write_sheet_consol(name, data, header_row=1):
-        ws = wb.create_sheet(name)
-        for j, col in enumerate(data.columns, start=1):
-            ws.cell(row=header_row, column=j, value=str(col))
-        for i in range(len(data)):
-            for j, col in enumerate(data.columns, start=1):
-                ws.cell(row=header_row + 1 + i, column=j, value=None if pd.isna(data.iloc[i][col]) else data.iloc[i][col])
-        headers_idx = {ws.cell(row=header_row, column=i).value: i for i in range(1, data.shape[1] + 1)}
-        if "Valor BRL" in headers_idx:
-            c = headers_idx["Valor BRL"]
-            for r in range(header_row + 1, header_row + 1 + len(data)):
-                ws.cell(row=r, column=c).number_format = u'R$ #,##0.00'
-        ws.auto_filter.ref = f"A{header_row}:{get_column_letter(ws.max_column)}{ws.max_row}"
-        _autosize(ws)
-        return ws
-
-    _write_sheet_consol("Consolidado Cartão", consol_cartao)
-    ws_ce = _write_sheet_consol("Consolidado Estabelecimento", consol_estab, header_row=2)
+    _write_sheet_consol(wb, "Consolidado Cartão", consol_cartao)
+    ws_ce = _write_sheet_consol(wb, "Consolidado Estabelecimento", consol_estab, header_row=2)
     ws_ce.insert_rows(1)
     ws_ce["A1"] = "NOTA: 'Final do Cartão' = últimos 4 dígitos; 'Nome do Portador' = nome impresso. Somente valores positivos."
     ws_ce.freeze_panes = "A3"
-    _write_sheet_consol("Consolidado Cat por Cartão", consol_cat_cartao)
+    _write_sheet_consol(wb, "Consolidado Cat por Cartão", consol_cat_cartao)
 
-    cols_dev = ["Data","Nome no Cartão","Final do Cartão","Categoria","Descrição","Parcela","Valor BRL"]
-    cols_dev_present = [c for c in cols_dev if c in df_neg.columns]
     ws_dev = wb.create_sheet("Devoluções")
-    for j, col in enumerate(cols_dev_present, start=1):
+    cols_dev = ["Data","Nome no Cartão","Final do Cartão","Categoria","Descrição","Parcela","Valor BRL"]
+    present = [c for c in cols_dev if c in df.columns]
+    for j, col in enumerate(present, start=1):
         ws_dev.cell(row=1, column=j, value=str(col if col != "Nome no Cartão" else "Nome do Portador"))
     for i in range(len(df_neg)):
-        for j, col in enumerate(cols_dev_present, start=1):
+        for j, col in enumerate(present, start=1):
             val = df_neg.iloc[i][col]
             ws_dev.cell(row=2 + i, column=j, value=None if pd.isna(val) else val)
-    if "Valor BRL" in cols_dev_present:
-        col_idx = cols_dev_present.index("Valor BRL") + 1
+    if "Valor BRL" in present:
+        col_idx = present.index("Valor BRL") + 1
         for r in range(2, ws_dev.max_row + 1):
             ws_dev.cell(row=r, column=col_idx).number_format = u'R$ #,##0.00'
     ws_dev.auto_filter.ref = f"A1:{get_column_letter(ws_dev.max_column)}{ws_dev.max_row}"
@@ -309,44 +525,27 @@ def build_processed_workbook(file_bytes: bytes) -> bytes:
     _autosize(ws_rf)
 
     ws_to = wb.create_sheet("Transações Originais")
-    for j, col in enumerate(df.columns, start=1):
-        ws_to.cell(row=1, column=j, value=str(col))
-    for i in range(len(df)):
-        for j, col in enumerate(df.columns, start=1):
-            ws_to.cell(row=2+i, column=j, value=None if pd.isna(df.iloc[i][col]) else df.iloc[i][col])
+    _write_df(ws_to, df)
     ws_to.sheet_state = "hidden"
-
-    ws_idx = wb.create_sheet("Índice", 0)
-    ws_idx["A1"] = "📑 Índice de Navegação"
-    row = 3
-    for name in ["Consolidado Cartão","Consolidado Estabelecimento","Consolidado Cat por Cartão","Resumo Fatura","Devoluções"]:
-        ws_idx.cell(row=row, column=1, value=name)
-        ws_idx.cell(row=row, column=1).hyperlink = f"#'{name}'!A1"
-        ws_idx.cell(row=row, column=1).style = "Hyperlink"
-        row += 1
-    ws_idx.cell(row=row, column=1, value="---"); row += 1
-    ws_idx.cell(row=row, column=1, value="Cartões (Mapa de Calor – Top 3 + Outras):"); row += 1
 
     df_pos = df[df["Valor BRL"] > 0].copy()
     holder_map = (
         df_pos.groupby(["Final do Cartão", "Nome no Cartão"])["Valor BRL"].sum()
         .reset_index()
-        .sort_values(["Final do Cartão", "Valor BRL"], ascending=[True, False])
-        .drop_duplicates(subset=["Final do Cartão"])
-        .set_index("Final do Cartão")["Nome no Cartão"].to_dict()
+        .sort_values(["Final do Cartão", "Valor BRL"], ascending=[True, False])        .drop_duplicates(subset=["Final do Cartão"]).set_index("Final do Cartão")["Nome no Cartão"].to_dict()
     )
     cats_por_cartao = df_pos.groupby("Final do Cartão")["Categoria"].nunique().to_dict()
     gastos_por_cartao_cat = (
         df_pos.groupby(["Final do Cartão", "Categoria"], as_index=False)["Valor BRL"].sum()
     )
 
+    cards_display = []
     for final_cartao, grupo in gastos_por_cartao_cat.groupby("Final do Cartão"):
         if grupo.shape[0] == 0:
             continue
         sheet_name = f"Cartão {final_cartao}"
         ws_card = wb.create_sheet(sheet_name)
         ws_card["A1"] = f"Mapa de Calor - Cartão {final_cartao} (Top 3 + Outras)"
-
         tabela = grupo.sort_values("Valor BRL", ascending=False).reset_index(drop=True)
         if tabela.shape[0] > 3:
             top3 = tabela.head(3).copy()
@@ -354,12 +553,10 @@ def build_processed_workbook(file_bytes: bytes) -> bytes:
             if outras_val > 0:
                 top3 = pd.concat([top3, pd.DataFrame([{"Categoria": "Outras", "Valor BRL": outras_val}])], ignore_index=True)
             tabela = top3
-
         holder = holder_map.get(str(final_cartao), "")
         chart_title = f"Distribuição de Gastos – Cartão {final_cartao}"
         if holder:
             chart_title += f" – {holder}"
-
         img = _build_pie_image_xl(tabela, chart_title, text_fontsize=8, title_fontsize=11)
         ws_card.add_image(img, "A3")
 
@@ -367,20 +564,9 @@ def build_processed_workbook(file_bytes: bytes) -> bytes:
             ws_card.sheet_state = "hidden"
 
         display_name = sheet_name + (f" – {holder}" if holder else "")
-        ws_idx.cell(row=row, column=1, value=display_name)
-        ws_idx.cell(row=row, column=1).hyperlink = f"#'{sheet_name}'!A1"
-        ws_idx.cell(row=row, column=1).style = "Hyperlink"
-        row += 1
+        cards_display.append((display_name, sheet_name))
 
-    ws_idx.column_dimensions["A"].width = 65
-
-    desired_after_index = ["Consolidado Cartão", "Consolidado Estabelecimento", "Consolidado Cat por Cartão"]
-    current = wb.sheetnames
-    ordered = ["Índice"] + [s for s in desired_after_index if s in current]
-    for s in current:
-        if s not in ordered:
-            ordered.append(s)
-    wb._sheets = [wb[s] for s in ordered]
+    _add_index_and_order(wb, cards_display)
 
     out_io = io.BytesIO()
     wb.save(out_io)
