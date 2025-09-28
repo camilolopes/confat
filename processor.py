@@ -408,6 +408,43 @@ def build_processed_workbook_nubank(file_bytes: bytes) -> bytes:
     return _build_excel_from_transactions(df)
 
 # --------- Workbook builder ---------
+
+def _parse_nubank_csv(file_bytes: bytes) -> pd.DataFrame:
+    bio = io.BytesIO(file_bytes)
+    try:
+        df = pd.read_csv(bio, sep=",")
+    except Exception:
+        bio.seek(0)
+        df = pd.read_csv(bio, sep=";")
+    # expected columns: date, title, amount
+    cols = {c.lower(): c for c in df.columns}
+    col_date = cols.get("date") or cols.get("data") or list(df.columns)[0]
+    col_title = cols.get("title") or cols.get("descricao") or cols.get("description") or list(df.columns)[1]
+    col_amount = cols.get("amount") or cols.get("valor") or list(df.columns)[2]
+    out = pd.DataFrame()
+    out["Data"] = pd.to_datetime(df[col_date], errors="coerce")
+    titles = df[col_title].astype(str)
+    clean_desc, parcelas = [], []
+    for t in titles:
+        d,p = _extract_parcela(t); clean_desc.append(d); parcelas.append(p)
+    out["Descrição"] = clean_desc
+    out["Parcela"] = parcelas
+    out["Valor BRL"] = pd.to_numeric(df[col_amount], errors="coerce")
+    out["Categoria"] = [ _categorize(d) for d in out["Descrição"] ]
+    out["Nome no Cartão"] = "Nubank"
+    out["Final do Cartão"] = "0000"
+    out = _enrich_parcelamento_columns(out)
+    return out
+
+def build_processed_workbook_nubank_auto(file_name: str, file_bytes: bytes) -> bytes:
+    name = (file_name or "").lower()
+    if name.endswith(".csv"):
+        df = _parse_nubank_csv(file_bytes)
+    elif name.endswith(".pdf"):
+        df = _parse_nubank_pdf(file_bytes)
+    else:
+        raise ValueError("Formato Nubank não suportado: use .csv ou .pdf")
+    return _build_excel_from_transactions(df)
 def _build_excel_from_transactions(df: pd.DataFrame) -> bytes:
     df_pos = df[df["Valor BRL"] > 0].copy(); df_neg = df[df["Valor BRL"] < 0].copy()
     consol_cartao = (df_pos.groupby(["Final do Cartão","Nome no Cartão","Descrição"], as_index=False)["Valor BRL"].sum().sort_values(["Final do Cartão","Valor BRL"], ascending=[True, False]).rename(columns={"Nome no Cartão":"Nome do Portador"}))

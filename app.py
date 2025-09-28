@@ -27,11 +27,12 @@ with st.expander("📌 Como funciona", expanded=False):
 """
     )
 
-bank = st.selectbox("Banco", ["C6 (Excel .xlsx)", "Nubank (PDF .pdf)"])
+bank = st.selectbox("Banco", ["C6 (Excel .xlsx)", "Nubank (PDF ou CSV)"])
 
 if bank.startswith("C6"):
     uploaded = st.file_uploader("Envie o arquivo .xlsx do C6", type=["xlsx"])
 elif bank.startswith("Nubank"):
+    uploaded = st.file_uploader("Envie a fatura do Nubank em .pdf ou .csv", type=["pdf","csv"])
     uploaded = st.file_uploader("Envie a fatura do Nubank em .pdf", type=["pdf"])
 else:
     uploaded = None
@@ -43,7 +44,7 @@ if uploaded is not None:
             if bank.startswith("C6"):
                 output_bytes = build_processed_workbook_c6(uploaded.read())
             else:
-                output_bytes = build_processed_workbook_nubank(uploaded.read())
+                output_bytes = build_processed_workbook_nubank_auto(uploaded.name, uploaded.read())
             st.success("Processamento concluído!")
             st.download_button(
                 label="⬇️ Baixar planilha processada",
