@@ -32,7 +32,7 @@ bank = st.selectbox("Banco", ["C6 (Excel .xlsx)", "Nubank (PDF ou CSV)"])
 if bank.startswith("C6"):
     uploaded = st.file_uploader("Envie o arquivo .xlsx do C6", type=["xlsx"])
 elif bank.startswith("Nubank"):
-    uploaded = st.file_uploader("Envie a fatura do Nubank em .pdf ou .csv", type=["pdf","csv"])
+    uploaded = st.file_uploader("Envie a fatura do Nubank (.pdf ou .csv)", type=["pdf","csv"])
     uploaded = st.file_uploader("Envie a fatura do Nubank em .pdf", type=["pdf"])
 else:
     uploaded = None
