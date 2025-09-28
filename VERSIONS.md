@@ -8,6 +8,19 @@
 
 ## 📈 Histórico de Versões
 
+### v19 — 28/09/2025
+**Status:** Estável
+
+**Correções e melhorias (C6)**:
+- **Sanitização da coluna `Parcela`** quando o Excel converte `2/4` em data (ex.: `2025-04-02` → `2/4`).  
+- **Respeito à coluna `Parcela` nativa** (não sobrescreve mais a partir de `Descrição` se já existir).  
+- **Normalização**: `Única` → `1/1`; `2 de 4`, `2 / 4`, `02/04` → `2/4`.  
+- **Aba `Parcelas Ativas` garantida** (sempre criada, populada quando houver parcelas em aberto).  
+- **Resumo** com **Compromissos Futuros** e quebra por **cartão/portador** quando aplicável.  
+
+**Nubank**: sem alterações (fluxo independente mantido).
+---
+
 ### v13 — 28/09/2025
 **Fixes:**
 - Correção de import no app: exposta a função pública `build_processed_workbook_nubank` no `processor.py` para evitar `ImportError` no `app.py`.
