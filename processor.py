@@ -273,7 +273,7 @@ def build_processed_workbook(file_bytes: bytes) -> bytes:
     row = 3
     for name in ["Consolidado Cartão","Consolidado Estabelecimento","Consolidado Cat por Cartão","Resumo Fatura","Devoluções"]:
         ws_idx.cell(row=row, column=1, value=name)
-        ws_idx.cell(row=row, column=1).hyperlink = f"#{name}!A1"
+        ws_idx.cell(row=row, column=1).hyperlink = f"#'{name}'!A1"
         ws_idx.cell(row=row, column=1).style = "Hyperlink"
         row += 1
     ws_idx.cell(row=row, column=1, value="---"); row += 1
@@ -320,7 +320,7 @@ def build_processed_workbook(file_bytes: bytes) -> bytes:
 
         display_name = sheet_name + (f" – {holder}" if holder else "")
         ws_idx.cell(row=row, column=1, value=display_name)
-        ws_idx.cell(row=row, column=1).hyperlink = f"#{sheet_name}!A1"
+        ws_idx.cell(row=row, column=1).hyperlink = f"#'{sheet_name}'!A1"
         ws_idx.cell(row=row, column=1).style = "Hyperlink"
         row += 1
 
